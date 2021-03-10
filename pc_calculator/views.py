@@ -210,21 +210,7 @@ def upload_program_outcome_file(request):
 
         if upload_result[0]:
             messages.success(request, f'Program Outcome file is successfuly uploaded. A submission report has been emailed to {request.user.email}.')
-            mail.send_mail(
-                f'[PÇ-Link]:  Program Outcome Upload for {course_code}',
-f'''
-The following file has been SUBMITTED.
-======================================================================
-Uploaded By: {request.user}
-File Name: {csvFile}
-Number of Processed Students: {upload_result[1]}
-Date Submitted: {datetime.datetime.now().strftime("%d/%b/%Y %H:%M:%S")}
-======================================================================
-''',
-                'pc-link@atilim.edu.tr',
-                [request.user.email],
-                fail_silently=False
-            )
+            #TODO: send_mail removed
             logger.info(f'[User: {request.user}] - An email has been sent to {request.user.email}.')
         else:
             messages.warning(request, 'No student from the department exists in the uploaded file.')
