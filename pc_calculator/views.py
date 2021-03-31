@@ -41,6 +41,7 @@ from pc_calculator.filters import *
 from pc_calculator.forms import *
 from pc_calculator.utils import *
 
+from itertools import chain
 import pandas as pd
 import datetime
 import logging
@@ -205,17 +206,47 @@ def upload_program_outcome_file(request):
         course_code = form.cleaned_data['course']
         semester_pk = form.cleaned_data['semester']
         csvFile = form.cleaned_data['outcome_file']
+        excempt_students_upload = form.cleaned_data['excempt_students']
 
-        upload_result = handle_upload(request, course_code, semester_pk, csvFile)
-
-        if upload_result[0]:
-            messages.success(request, f'Program Outcome file is successfuly uploaded. A submission report has been emailed to {request.user.email}.')
-            #TODO: send_mail removed
-            logger.info(f'[User: {request.user}] - An email has been sent to {request.user.email}.')
+        if excempt_students_upload == True:
+            handle_excempt_students(request, csvFile)
+            logger.info(f'Excempt students course list is uploaded by {request.user.username}.')
         else:
-            messages.warning(request, 'No student from the department exists in the uploaded file.')
+            upload_result = handle_upload(request, course_code, semester_pk, csvFile)
+
+            if upload_result[0]:
+                messages.success(request, f'Program Outcome file is successfuly uploaded. A submission report has been emailed to {request.user.email}.')
+                mail.send_mail(
+                    f'[PÇ-Link]:  Program Outcome Upload for {course_code}',
+f'''
+The following file has been SUBMITTED.
+======================================================================
+Uploaded By: {request.user}
+File Name: {csvFile}
+Number of Processed Students: {upload_result[1]}
+Date Submitted: {datetime.datetime.now().strftime("%d/%b/%Y %H:%M:%S")}
+======================================================================
+''',
+                    'pc-link@atilim.edu.tr',
+                    [request.user.email],
+                    fail_silently=False
+                )
+                logger.info(f'[User: {request.user}] - An email has been sent to {request.user.email}.')
+            else:
+                messages.warning(request, 'No student from the department exists in the uploaded file.')
     
     return render(request, 'pc_calculator/upload.html', { 'form': form })
+
+
+def calculate_avgs(row):
+    for idx in set(list(zip(*row.index))[0]):
+        if row[idx].isna().sum() == len(row[idx]):
+            row[idx, "AVG"] = 'NA'
+        elif (row[idx].isna().sum() - 1) <= len(row[idx]) / 2:
+            row[idx, "AVG"] = 0 if row[idx].mean() < 0.5 else 1
+        else:
+            row[idx, "AVG"] = 'IN'
+    return row
 
 
 @login_required
@@ -235,44 +266,12 @@ def export(request):
         tuples += [(po.code, course.code) for course in po.course_set.all()] + [(po.code, 'AVG')]
     index = pd.MultiIndex.from_tuples(tuples)
 
-    report_df = pd.DataFrame(index=Student.objects.values_list('no', 'name'), columns=index)
+    report_df = pd.DataFrame(index=Student.objects.filter(graduated_on__isnull=True).values_list('no', 'name'), columns=index)
 
-    records = list()
-    for student in Student.objects.filter(graduated_on__isnull=True):
-        poas = list()
-        for po in ProgramOutcome.objects.all():
-            por = ProgramOutcomeResult.objects.filter(
-                student=student,
-                program_outcome=po,
-                semester__in=semesters
-            )
-
-            for pr in por:
-                report_df.loc[student.no, (po.code, pr.course.code)] = pr.satisfaction
-
-            total_number_of_courses = len(po.course_set.all())
-
-            if len(por) == 0:
-                poas.append('NA')
-                report_df.loc[student.no, (po.code, 'AVG')] = 'NA'
-            elif total_number_of_courses == 1:
-                poas.append(por.first().satisfaction)
-                report_df.loc[student.no, (po.code, 'AVG')] = str(por.first().satisfaction)
-            elif len(por) < (total_number_of_courses / 2):
-                poas.append('IN')
-                report_df.loc[student.no, (po.code, 'AVG')] = 'IN'
-            else:
-                satisfied_pors = por.filter(satisfaction=1)
-                if len(satisfied_pors) >= round(total_number_of_courses / 2):
-                    poas.append(1)
-                    report_df.loc[student.no, (po.code, 'AVG')] = '1'
-                else:
-                    poas.append(0)
-                    report_df.loc[student.no, (po.code, 'AVG')] = '0'
-
-        records.append([student.no, student.name] + poas)
+    for por in ProgramOutcomeResult.objects.filter(semester__in=semesters, student__graduated_on__isnull=True).order_by('semester__period_order_value'):
+        report_df.loc[por.student.no, (por.program_outcome.code, por.course.code)] = por.satisfaction
     
-    csv_report_df = pd.DataFrame(records, columns=["student_id", "name"] + [po.code for po in ProgramOutcome.objects.all()])
+    report_df.apply(calculate_avgs, axis=1)
 
     if file_type == 'xlsx':
         xlsx_buffer = io.BytesIO()
@@ -283,7 +282,7 @@ def export(request):
         response["Content-Disposition"] = 'attachment; filename="report.xlsx"'
     elif file_type == 'csv':
         csv_buffer = io.StringIO()
-        csv_report_df.to_csv(csv_buffer, index=False)
+        report_df.to_csv(csv_buffer, index=True)
         csv_buffer.seek(0)
         response = HttpResponse(csv_buffer.read(), content_type = 'text/csv')
         response["Content-Disposition"] = 'attachment; filename="report.csv"'
@@ -296,7 +295,7 @@ def course_report(request):
     logger.info(f'The list of not uploaded courses is requested by {request.user}.')
     semester_id = request.POST['semester']
     semester = get_object_or_404(Semester, pk=semester_id)
-    uploaded_courses_set = set([course_id['course'] for course_id in ProgramOutcomeResult.objects.filter(semester=semester).values('course')])
+    uploaded_courses_set = set(chain.from_iterable(ProgramOutcomeFile.objects.filter(semester=semester).values_list('course')))
 
     return render(request, 'pc_calculator/upload_status.html', {'semester': semester, 'courses': Course.objects.all(), 'ucourses_ids': uploaded_courses_set})
 
@@ -333,26 +332,36 @@ def populate_students(request):
 @login_required
 @staff_member_required
 def recalculate_all_pos(request):
-    for csv_file in glob.glob(os.path.join(settings.MEDIA_ROOT, '**', '*.csv'), recursive=True):
-        csv_file_df = pd.read_csv(csv_file, sep=None, engine='python')
+    logger.info('Deleting existing records...')
+    ProgramOutcomeResult.objects.all().delete()
+
+    logger.info('All POs are recalculating...')
+    all_po_files = ProgramOutcomeFile.objects.all()
+    for po_count, program_outcome_file in enumerate(all_po_files):
+        logger.debug(f'Read from file: {program_outcome_file.pc_file.name}. Remaining: {len(all_po_files) - (po_count + 1)}')
+
+        with program_outcome_file.pc_file.open(mode='rb') as csv_file:
+            contents_byte_str = csv_file.read()
+            enc, _ = force_decode(contents_byte_str)
+
+        csv_file_df = pd.read_csv(program_outcome_file.pc_file.path, sep=None, engine='python', encoding=enc)
         file_pos = set(csv_file_df.columns[2:])
 
         for idx, row in csv_file_df.iterrows():
-            student = Student.objects.filter(no=row['student_id'], graduated_on__isnull=True).first()
+            student = Student.objects.filter(no=row.iloc[0], graduated_on__isnull=True).first()
 
             if student is not None:
                 for po_idx, po in enumerate(file_pos):
                     program_outcome = ProgramOutcome.objects.get(code=po.strip())
 
-                    ProgramOutcomeResult.objects.update_or_create(
-                        student=student,
-                        # course=course,
-                        program_outcome=program_outcome,
-                        # semester=semester,
-                        defaults={
-                            'satisfaction': 1 if str(row.iloc[po_idx + 2]) == "1" or str(row.iloc[po_idx + 2]) == "M" else 0
-                        }
-                    )
-
+                    if not row.iloc[po_idx + 2:].astype(str).str.contains('U').any():
+                        ProgramOutcomeResult.objects.create(
+                            student=student,
+                            course=program_outcome_file.course,
+                            program_outcome=program_outcome,
+                            semester=program_outcome_file.semester,
+                            satisfaction= 1 if str(row.iloc[po_idx + 2]) == "1" or str(row.iloc[po_idx + 2]) == "M" else 0
+                        )
     
+    messages.success(request, 'All student POs successfuly recalculated.')
     return redirect('profile')

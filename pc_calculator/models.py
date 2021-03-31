@@ -30,13 +30,8 @@ class User(AbstractUser):
 class Semester(models.Model):
     year_interval = models.CharField(max_length=9)
     period_name = models.CharField(max_length=6)
+    period_order_value = models.IntegerField(default=1)
     active = models.BooleanField(default=False)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=['active'],
-                condition=models.Q(active=True), name='unique_active')
-        ]
 
     def __str__(self):
         return self.year_interval + " " + self.period_name
@@ -90,3 +85,6 @@ class ProgramOutcomeResult(models.Model):
         return self.student.name + " - " + self.course.code + " - [" + \
             self.program_outcome.code + "] - " + str(self.semester) + " - " + \
                 str(self.satisfaction)
+    
+    class Meta:
+        ordering = ['course']
